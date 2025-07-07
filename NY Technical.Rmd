@@ -1,0 +1,968 @@
+
+---
+title: "Fixed Income Risk Analysis – Case Study"
+author: "Noluvuyo Yumata"
+output:
+  slidy_presentation: default
+  html_document: null
+  pdf_document:
+    toc: true
+  powerpoint_presentation:
+    reference_doc: default
+  ioslides_presentation: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = FALSE,   # hide code by default
+  warning    = FALSE,
+  message    = FALSE,
+  fig.width  = 7,       # fits PowerPoint 16:9 slides
+  fig.height = 4.5
+)
+
+
+
+library(gt)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(stringr)
+library(knitr)  
+library(scales)
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(patchwork)
+library(openxlsx)
+library(stringr)
+library(flextable)
+library(tidyr)
+library(quantmod)
+library(tidyquant)
+library(kableExtra)
+library(ggrepel)
+
+file <- "FI Risk Analyst Case Study.xlsx"
+```
+
+```{r, include= FALSE}
+#---------------------------------------------- DATA EXPLORATION ---------------------------------------------------------------
+# Load snapshots -----------------------------------------------------
+mar <- read_excel(file, sheet = "FI Data (31 March 2024)")
+jun <- read_excel(file, sheet = "FI Data (30 June 2024)")
+
+# Load risk‑metric history ------------------------------------------
+risk_ts <- read_excel(file, sheet = "Risk Metrics (Time Series)") %>%
+  clean_names() %>%
+  mutate(reference_date = as.Date(reference_date))
+
+# Combine & clean snapshot data -------------------------------------
+snaps_raw <- bind_rows(
+  mar %>% mutate(snapshot = as_date("2024‑03‑31")),
+  jun %>% mutate(snapshot = as_date("2024‑06‑30"))
+) %>%
+  clean_names() %>%
+  mutate(
+    dirty_price = readr::parse_number(dirty_price),
+    across(matches("(percent|pct|%)$", ignore.case = TRUE), as.numeric)
+  )
+
+summary(snaps_raw)
+```
+
+```{r, include = FALSE }
+
+
+#------------------------  Issuer Classification --------------------------------------------------------------------------------------------------------------------------
+
+classify_issuer <- function(name) {
+  name <- str_to_upper(as.character(name)) #Comparison regardless of text format
+  case_when(
+    str_detect(name, "NEDBANK") ~ "Nedbank",
+    str_detect(name, "ABSA") ~ "ABSA",
+    str_detect(name, "STANDARD BANK") ~ "Standard Bank",
+    str_detect(name, "FIRSTRAND") ~ "FirstRand",
+    str_detect(name, "INVESTEC BANK") ~ "Investec Bank",
+    str_detect(name, "CORBON|NINETY ONE") ~ "Ninety One",
+    str_detect(name, "SOUTH AFRICA, REPUBLIC") | str_detect(name, "SOUTH AFRICA\\s+R\\d{3,4}")~ "SA Govi",
+    str_detect(name, "NAMIBIA, REPUBLIC") ~ "Namibia Govi",
+    str_detect(name, "LIBERTY") ~ "Liberty",
+    str_detect(name, "OLD MUTUAL") ~ "Old Mutual",
+    str_detect(name, "MOMENTUM") ~ "Momentum",
+    str_detect(name, "SANLAM") ~ "Sanlam",
+    str_detect(name, "SANTAM") ~ "Santam",
+    str_detect(name, "REDEFINE") ~ "Redefine",
+    str_detect(name, "GROWTHPOINT") ~ "Growthpoint",
+    str_detect(name, "NORTHAM") ~ "Northam",
+    str_detect(name, "CAPE TOWN") ~ "City of CPT",
+    str_detect(name, "TSHWANE") ~ "City of Tshwane",
+    str_detect(name, "AIRPORTS CO") ~ "ACSA",
+    str_detect(name, "SOUTH AFRICAN NATIONAL ROADS") ~ "Sanral",
+    str_detect(name, "TRANSNET") ~ "Transnet",
+    str_detect(name, "ESKOM") ~ "Eskom",
+    str_detect(name, "TELKOM") ~ "Telkom",
+    str_detect(name, "MOBILE TELEPHONE NETWORKS") ~ "MTN",
+    str_detect(name, "MOMENTUM") ~ "Momentum",
+    str_detect(name, "RAND WATER") ~ "Rand water",
+    str_detect(name, "TOYOTA") ~ "Toyota",
+    str_detect(name, "THEKWINI") ~ "Thekwini Fund",
+    str_detect(name, "NQABA FINANCE") ~ "Nqaba Finance",
+    str_detect(name, "GREENHOUSE FUNDING") ~ "Greenhouse Fund",
+    str_detect(name, "SOUTH AFRICAN RAND") ~ "Cash",
+    TRUE ~ "Other / Unmapped"
+  )
+}
+snaps_raw$issuer <- sapply(snaps_raw$asset_name, classify_issuer)
+
+```
+
+```{r, incude = FALSE}
+#--------------------------------------------- Asset Class classification ----------------------------------------------------------------------------------------
+
+
+classify_class <- function(df){
+  df %>%
+    mutate(
+      asset_type = case_when(
+
+        # --- look at coupon_type OR asset_name --------------------
+        asset_id == "ZAR" | str_detect(asset_name, regex("ZAR|CASH|South African Rand", TRUE))
+                      ~ "Cash",
+
+        str_detect(asset_name, regex("\\TREASURY |SOUTH AFRICA, REPUBLIC | \\s+R\\d{3,4}", TRUE))
+                      ~ "SAGBs",
+        
+        str_detect(asset_name, regex("BANK| ABSA| STANDARD BANK | FIRSTRAND |CAPITEC|NEDBANK", TRUE))
+                      ~ "SA Banks",
+
+        str_detect(asset_name, regex("THEKWINI|NQABA|FUND|SECURIT|SPV|CMBS|RMBS", TRUE))
+                      ~ "Securitisation",
+        
+        str_detect(asset_name, regex("NAMIBIA", TRUE))
+                      ~ "Offshore govi",
+   TRUE  ~ "Corporate")
+     
+    )
+}
+
+class_classif <- classify_class(snaps_raw)
+
+structured <- c( "SSW240606",
+"SSW240607",
+"SSW240608",
+"SSW240609",
+"SSW231206",
+"SSW240201"
+ )
+
+future <- c("RDQ24",
+            "ZBK24",
+            "REQ24",
+            "RFQ24",
+            "RDQ24",
+            "REQ24",
+            "RFQ24",
+            "ZBQ24",
+            "ZNQ24",
+            "ZPQ24",
+            "ZSQ24",
+            "ZTQ24",
+           "RDK24",
+            "REK24",
+            "RFK24",
+            "ZBK24",
+            "ZNK24",
+            "ZPK24",
+            "ZSK24",
+            "ZTK24"
+
+            )
+
+repos <- c("006XNO",
+           "02WN0S")
+
+
+structured <- c("SSW240606",
+                "SSW240607",
+                "SSW240608",
+              "SSW240609"
+)
+
+zero_cpn <- c("CORBON")
+
+
+classify_asset_type<- function(df){
+  df %>%
+    mutate(
+      asset_type = case_when(
+
+        # --- look at coupon_type OR asset_name --------------------
+        asset_id == "ZAR" | str_detect(asset_name, regex("ZAR|CASH|South African Rand", TRUE))
+                      ~ "Cash",
+
+        str_detect(asset_name, regex("\\TREASURY |SOUTH AFRICA, REPUBLIC | \\s+R\\d{3,4}", TRUE))
+                      ~ "SAGBs",
+
+        asset_id =="NSW231203" | str_detect(asset_name, regex("JIBAR |JIB|FRN|FLOAT", ignore_case = TRUE)) 
+                      ~ "Swaps",
+        
+
+        str_detect(asset_name, regex("THEKWINI|NQABA|FUND|SECURIT|SPV|CMBS|RMBS", TRUE))
+                      ~ "Securitisation",
+        
+        asset_id == "CORBON" ~ "Zero Coupon" ,
+        
+        asset_id %in% structured ~ "Structured" ,
+        
+        asset_id %in% future ~ "Futures" ,
+        
+        asset_id %in% repos ~ "Repos",
+
+        !is.na(asset_name)| asset_id =="ZAG000138470" ~ "Corporate",
+
+        TRUE             ~ "Other"      # default bucket
+      )
+    )
+}
+
+type_classif <- classify_asset_type(class_classif)
+
+```
+
+
+```{r, include = FALSE }
+#_____________________________________________ ANOMALITY DETECTION & FLAGGING --------------------------------------------------------------------------------------
+snap_flagged <- function(x) {
+  x %>%
+  mutate(price_zero   = price <= 0,
+         price_na     = is.na(price),
+         dur_extreme  = active_effective_duration_mac > 100,
+         neg_holdings = holdings < 0,
+         high_risk     = weight_percent <=0 & abs(active_total_risk) > 50, # update these thereshold if needed
+         flag_any = price_zero|price_na| dur_extreme|neg_holdings| high_risk
+    ) %>%
+    filter(flag_any)
+}
+
+flag_obs  <- snap_flagged(type_classif)
+
+# ──--------------- Side‑by‑side summary table ───────────────────────────────────────────
+summary_tbl <- flag_obs %>%
+  pivot_longer(cols = c(price_zero,price_na, dur_extreme,neg_holdings, high_risk),
+               names_to = "Flag", values_to = "Triggered") %>%
+  filter(Triggered) %>%
+  group_by(snapshot, Flag) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = snapshot, values_from = Count, values_fill = 0) %>%
+  arrange(Flag) 
+
+#print(summary_tbl)
+
+
+#-------------------------- Review & Automate the flagged observations
+
+#---- This anomalities are saved straight to the folder
+
+wb <- createWorkbook()
+addWorksheet(wb, "flag_obs");  writeData(wb, "flag_obs", flag_obs)
+saveWorkbook(wb, "Flagged_abnomalies.xlsx", overwrite = TRUE)
+
+
+```
+
+
+```{r, include=FALSE}
+
+#----------------------------------------- PRICE OVERRIDES - TEMP PLACE HOLDERS--------------------------------------------------------------------------------------
+# approc Price with par and Corporate with par 100
+
+pric_adj <- type_classif %>%
+  mutate(price = if_else(asset_id %in% c("ZAR"), 1, price),
+         price = if_else(asset_type %in% c("Corporate","SA Banks"), 100, price))
+  
+
+#------------------------------------ HEDGE AdJuSTMENTS ------------------------------------------------------------------------------------------------------------
+
+hedge_df <- pric_adj %>%
+  mutate(hedging = if_else(asset_type %in% c("Future","FRN"), "hedge","non hedge")) 
+  
+#----------------------------------CLEANED PORTFOLIO ---------------------------------------------------------------------------------------------------------------
+
+#For negative positions (which with no material impact on NAV)- kept them position but assigned zero holdings 
+snap_clean <- hedge_df %>%
+ mutate(holdings = ifelse(holdings<0,0,holdings)) %>% # this is to neutralise the positions
+mutate(mv = price*holdings) %>%
+  mutate(holdings_weight=holdings/sum(holdings))
+
+
+#see if the adjustments
+#summary(snap_clean) 
+```
+
+
+---
+
+# **Global Macro Enviroment**
+
+* High-Interest Rate volatility and slow easing to Disinflation
+*	1Q24- Due to sticky inflation, Economic Instability & Uncertanity around geopolitical 
+* 2Q24- Advance economies saw inflation gradually decoding leading to market to factor first rate cuts late in 2024/2025
+* Euro zone being the first to cut rates in March 2024 by 25bp Due to their CPI falling below their target sat of 2%. 
+* Swiss Low Inflation, low- growth mix allowed it to set the tone for Global rate cut cycle.
+*	US CPI has fallen from a high of 9.1 % (Jun-22) to the mid-2 % zone; core-PCE is now just below 2.5%.
+
+---
+
+# **Local Macro Enviroment**
+
+* Highly Volatile Market(1Q24) and improving risk sentiments, boosting Investor Confidence (2Q24) 
+* *Inflation & MPC Policy*	CPI ~ 5.2% to 5.6% (above SARB mid target) and tilted towards 4%.
+* *Economic Activity*	 Weak to Stabilising GDP growth & improving Business sentiment.
+  1Q24 GDP(-0,3%) to 2Q24 (0.4) from mining, manufacturing,  Transport.
+  *Load shedding eased* Improving business and production constraints
+* *Structural and Fiscal factor* Infrastructure bottleneck, high Unemployment, High Govi debt (74% of GDP) and 2024 Election results.
+  GNU boosted Investor confidence, optimism towards accelerated reforms and embedded policy stability.
+* *SARB held rates steady* at 8.25% indicating repo-rate cuts late in 2Q24 despite signs of improving Macro conditions (both Globally and locally)
+
+---
+
+
+# Portfolio Headline - Jun 24
+
+```{r headline }
+headline_stat <- snap_clean %>%                  # ← your original aggregation
+  group_by(snapshot) %>%
+  summarise(
+    NAV           = sum(holdings),
+    total_mv      = sum(holdings * price),
+    port_duration = weighted.mean(active_effective_duration_mac,
+                                  w = weight_percent),
+    spread_dur    = weighted.mean(active_spread_duration,
+                                  w = weight_percent),
+    n_positions   = n(),
+    .groups = "drop"
+  )
+
+
+june_tbl <- headline_stat %>%                          # already created above
+  filter(snapshot == as.Date("2024-06-30")) %>%
+  select(-snapshot) %>%
+  mutate(across(c(NAV, total_mv), ~ .x / 1e9)) %>%     # R-billions
+  pivot_longer(everything(),
+               names_to  = "Metric",
+               values_to = "Value") %>% 
+  mutate(                                              # pretty labels
+    Metric = recode(Metric,
+      NAV           = "NAV (R bn)",
+      total_mv      = "Total MV (R bn)",
+      port_duration = "Eff. MacDur (yrs)",
+      spread_dur    = "Spread Dur (yrs)",
+      n_positions   = "No. Positions"
+    )
+  )
+
+# ── Presentation table with gt ──────────────────────────────────────
+june_tbl %>% 
+  gt(rowname_col = "Metric") %>%      # metrics become row labels
+
+  ## Header ----
+  tab_header(
+    title    = md("**Portfolio Headline Metrics**"),
+    subtitle = md("As at&nbsp;30&nbsp;June&nbsp;2024")
+  ) %>% 
+
+  ## Number formatting ----
+  fmt_number(
+    rows = Metric %in% c("NAV (R bn)", "Total MV (R bn)"),
+    decimals = 1
+  ) %>% 
+  fmt_number(
+    rows = Metric %in% c("Eff. MacDur (yrs)", "Spread Dur (yrs)"),
+    decimals = 2
+  ) %>% 
+  fmt_integer(
+    rows = Metric == "No. Positions",
+    sep_mark = ","
+  ) %>% 
+
+  ## Styling ----
+  cols_label(Value = "") %>%          # hide column header
+  cols_align(align = "right") %>% 
+  cols_width(everything() ~ px(180)) %>% 
+  tab_options(
+    table.font.names        = "Verdana, Arial, sans-serif",
+    data_row.padding        = px(4),
+    table.border.top.style  = "hidden",
+    table.border.bottom.style = "hidden"
+  ) %>% 
+  # subtle banding
+  tab_style(
+    style = cell_fill(color = "#f7f7f7"),
+    locations = cells_body(rows = seq(2, nrow(june_tbl), 2))
+  )
+
+```
+
+* The porfolio has a nominal value of R4,6% bn and mainly concentrated around long dated govies with strategic tits using credit ( NinetyOne Bond at ~60%, ASW ( 25%) then GOV futures. It has a mac duration -0.76 and spread duration of -0.65  Suggest a strategic tilt around short-dated instruments & strong credit using of derivates instruments including swaps and futures. 
+
+
+---
+
+# Asset Mix (% Holdings)
+
+
+```{r asset_nominal include}
+
+june  <- snap_clean %>%
+         filter(snapshot == as.Date("2024-06-30"))
+
+# ── 2  Presentation theme with extra title spacing ────────
+theme_present <- function() {
+  theme_minimal(base_size = 12, base_family = "Arial") %+replace%
+    theme(
+      plot.title      = element_text(size = 14, face = "bold",
+                                     hjust = 0.5, margin = margin(b = 15)),
+      plot.subtitle   = element_text(size = 11,  hjust = 0.5,
+                                     margin = margin(b = 6)),
+      axis.title.y    = element_blank(),
+      axis.title.x    = element_text(margin = margin(t = 6)),
+      axis.text       = element_text(color = "grey30"),
+      panel.grid.major.y = element_blank(),
+      legend.position = "none",
+      plot.margin     = margin(10, 20, 10, 10)  # TLBR
+    )
+}
+
+# Corporate colour (same for all bars)
+corp_blue <- "#2C7FB8"
+
+# Helper to add % labels above bars ------------------------
+add_pct_labels <- function(df, pct_col) {
+  geom_text(aes(label = percent({{ pct_col }}, accuracy = 0.1)),
+            hjust = -0.15, size = 3.3)
+}
+
+# ── 3-A  Asset-type allocation (% holdings) ─────────────────────
+asset_alloc <- june %>%
+  group_by(asset_type) %>%
+  summarise(holdings = sum(holdings, na.rm = TRUE), .groups = "drop") %>%
+  mutate(pct = holdings / sum(holdings))
+
+asset_mix_nom <- ggplot(asset_alloc,
+       aes(x = fct_reorder(asset_type, pct), y = pct)) +
+  geom_col(width = 0.7, fill = corp_blue) +
+  add_pct_labels(asset_alloc, pct) +
+  coord_flip(clip = "off") +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, max(asset_alloc$pct) * 1.15)) +
+  labs(title = "Asset Mix (% Nominal)",
+       subtitle = "30 Jun 2024  . % of portfolio nominal",
+       y = "% of nominal") +
+  theme_present()
+
+print(asset_mix_nom)
+```
+---
+
+# Asset Mix (% MV)
+
+```{r asset_m }
+
+june  <- snap_clean %>%
+         filter(snapshot == as.Date("2024-06-30"))
+
+# ── 2  Presentation theme with extra title spacing ────────
+theme_present <- function() {
+  theme_minimal(base_size = 12, base_family = "Arial") %+replace%
+    theme(
+      plot.title      = element_text(size = 14, face = "bold",
+                                     hjust = 0.5, margin = margin(b = 15)),
+      plot.subtitle   = element_text(size = 11,  hjust = 0.5,
+                                     margin = margin(b = 6)),
+      axis.title.y    = element_blank(),
+      axis.title.x    = element_text(margin = margin(t = 6)),
+      axis.text       = element_text(color = "grey30"),
+      panel.grid.major.y = element_blank(),
+      legend.position = "none",
+      plot.margin     = margin(10, 20, 10, 10)  # TLBR
+    )
+}
+
+# Corporate colour (same for all bars)
+corp_blue <- "#2C7FB8"
+
+# Helper to add % labels above bars ------------------------
+add_pct_labels <- function(df, pct_col) {
+  geom_text(aes(label = percent({{ pct_col }}, accuracy = 0.1)),
+            hjust = -0.15, size = 3.3)
+}
+
+# ── 3-A  Asset-type allocation (% holdings) ─────────────────────
+asset_alloc_mv <- june %>%
+  group_by(asset_type) %>%
+  summarise(mv = sum(mv, na.rm = TRUE), .groups = "drop") %>%
+  mutate(pct = mv / sum(mv))
+
+asset_mix_mv <- ggplot(asset_alloc,
+       aes(x = fct_reorder(asset_type, pct), y = pct)) +
+  geom_col(width = 0.7, fill = corp_blue) +
+  add_pct_labels(asset_alloc, pct) +
+  coord_flip(clip = "off") +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, max(asset_alloc$pct) * 1.15)) +
+  labs(title = "Asset Mix (% Market value)",
+       subtitle = "30 Jun 2024  .  % of portfolio market value",
+       y = "% of mv") +
+  theme_present()
+
+asset_mix_mv 
+
+#----------------------------------------- BOTH ASSET MIX BY NOMINAL AND MV___________________________________
+```
+
+---
+
+# Issuer(%Holdings)
+
+```{r }
+# ── 3-C  Issuer allocation (% holdings) ─────────────────────────
+issuer_alloc <- june %>%
+  group_by(issuer,asset_type) %>%         # change if your column differs
+  summarise(holdings = sum(holdings, na.rm = TRUE), .groups = "drop") %>%
+  mutate(pct = holdings / sum(holdings)) %>%
+  arrange(desc(pct)) %>%
+   slice_head(n = 5)
+
+ggplot(issuer_alloc,
+       aes(x = fct_reorder(issuer, pct), y = pct)) +
+  geom_col(width = 0.7, fill = corp_blue) +
+  add_pct_labels(issuer_alloc, pct) +
+  coord_flip(clip = "off") +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, max(issuer_alloc$pct) * 1.15)) +
+  labs(title = "Top 5 Issuer (% Nominal)",
+       subtitle = "30 Jun 2024 % of portfolio nominal",
+       y = "% of nominal") +
+  theme_present()
+
+```
+----
+
+# Issuer (% mv)
+
+```{r }
+# ── 3-C  Issuer allocation (% market value) ─────────────────────────
+issuer_alloc <- june %>%
+  group_by(issuer,asset_type) %>%         # change if your column differs
+  summarise(mv = sum(mv, na.rm = TRUE), .groups = "drop") %>%
+  mutate(pct = mv / sum(mv)) %>%
+  arrange(desc(pct)) %>%
+   slice_head(n = 5)
+
+ggplot(issuer_alloc,
+       aes(x = fct_reorder(issuer, pct), y = pct)) +
+  geom_col(width = 0.7, fill = corp_blue) +
+  add_pct_labels(issuer_alloc, pct) +
+  coord_flip(clip = "off") +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, max(issuer_alloc$pct) * 1.15)) +
+  labs(title = "Top 5 Issuer (% market Value)",
+       subtitle = "30 Jun 2024  ·  % of portfolio market value",
+       y = "% of mv") +
+  theme_present()
+
+
+```
+
+---
+
+# Top instruments (% Nominal)
+
+
+
+```{r }
+
+# ──------------------------Top-5 asset_names (% holdings) ─────────────────────────
+top5_instr <- june %>%
+  group_by(asset_id, asset_type) %>%      # change if your column differs
+  summarise(holdings = sum(holdings, na.rm = TRUE), .groups = "drop") %>%
+  mutate(pct = holdings / sum(june$holdings, na.rm = TRUE)) %>%
+  arrange(desc(holdings)) %>%
+  slice_head(n = 5) 
+  
+
+ggplot(top5_instr,
+       aes(x = fct_reorder(asset_id, pct), y = pct)) +
+  geom_col(width = 0.7, fill = corp_blue) +
+  add_pct_labels(top5_instr, pct) +
+  coord_flip(clip = "off") +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, max(top5_instr$pct) * 1.15)) +
+  labs(title = "Top-5 Instruments (% Nominal)",
+       subtitle = "30 Jun 2024  ·  % of portfolio nominal",
+       y = "% of nominal") +
+  theme_present()
+
+```
+
+---
+
+# Top instruments (% MV)
+
+
+```{r }
+
+# ──------------------------Top-5 asset_names (% mv) ─────────────────────────
+top5_instr <- june %>%
+  group_by(asset_id, asset_type) %>%      # change if your column differs
+  summarise(mv = sum(mv, na.rm = TRUE), .groups = "drop") %>%
+  mutate(pct = mv/ sum(june$mv, na.rm = TRUE)) %>%
+  arrange(desc(mv)) %>%
+  slice_head(n = 5) 
+  
+
+ggplot(top5_instr,
+       aes(x = fct_reorder(asset_id, pct), y = pct)) +
+  geom_col(width = 0.7, fill = corp_blue) +
+  add_pct_labels(top5_instr, pct) +
+  coord_flip(clip = "off") +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, max(top5_instr$pct) * 1.15)) +
+  labs(title = "Top-5 Instruments (% Market value)",
+       subtitle = "30 Jun 2024  ·  % of portfolio market value",
+       y = "% of mv") +
+  theme_present()
+
+```
+
+---
+
+# Snapshots changes- Mar24 -> Jun24
+
+```{r asset_trend_holdings }
+#---------------------------------------------- ASSET ALLOCATION by Nominal -----------------------------------------------------------------------------------
+# allocation by snapshot & asset_type ─────────────
+alloc <- snap_clean %>%
+  group_by(snapshot, asset_type) %>%
+  summarise(holdings_sum = sum(holdings, na.rm = TRUE), .groups = "drop") %>%
+  group_by(snapshot) %>%
+  mutate(pct = holdings_sum / sum(holdings_sum, na.rm = TRUE)) %>%
+  ungroup()
+
+# plot with % labels ────────────────────────────────
+pd <- position_dodge(width = 0.75)   # reuse for geom_col and geom_text
+
+ggplot(alloc,
+       aes(x = asset_type,
+           y = pct,
+           fill = factor(snapshot))) +
+  geom_col(position = pd, width = 0.75) +
+  geom_text(aes(label = percent(pct, accuracy = 0.1)),
+            position = pd,
+            vjust = -0.4,             # move slightly above bar
+            size = 3) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, max(alloc$pct) * 1.15)) +   # add head-room
+  labs(title = "Asset Mix (% Nominal)",
+       x = "Asset type",
+       y = "Portfolio weight (%)",
+       fill = "Snapshot") +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    plot.title    = element_text(hjust = 0.5),   # ← centred
+    plot.subtitle = element_text(hjust = 0.5)    # ← centred
+  )
+```
+
+* *Cash redeployment* of R500m to Swaps(FRNs) and structured (Long Dated SAGBs) as to avoid a cash drag ahead of cutting rate cycle. 
+* This seemed like a strategic move to slowly increase duration and benefit from cary through FRNs without exposing the portfolio to excess risk.
+
+---
+
+# Asset Mix (% MV )
+
+
+```{r asset_trend_mv }
+alloc <- snap_clean %>%
+  group_by(snapshot, asset_type) %>%
+  summarise(mv_sum = sum(mv, na.rm = TRUE), .groups = "drop") %>%
+  group_by(snapshot) %>%
+  mutate(pct = mv_sum / sum(mv_sum, na.rm = TRUE)) %>%
+  ungroup()
+
+# plot with % labels ────────────────────────────────
+pd_nominal <- position_dodge(width = 0.75)   # reuse for geom_col and geom_text
+
+ggplot(alloc,
+       aes(x = asset_type,
+           y = pct,
+           fill = factor(snapshot))) +
+  geom_col(position = pd, width = 0.75) +
+  geom_text(aes(label = percent(pct, accuracy = 0.1)),
+            position = pd,
+            vjust = -0.4,             # move slightly above bar
+            size = 3) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, max(alloc$pct) * 1.15)) +   # add head-room
+  labs(title = "Asset Type (% Market Value)",
+       #subtitle = "Snapshots: 2024-03-31 vs 2024-06-30",
+       x = "Asset type",
+       y = "Portfolio weight (%)",
+       fill = "Snapshot") +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    plot.title    = element_text(hjust = 0.5),   # ← centred
+    plot.subtitle = element_text(hjust = 0.5)    # ← centred
+  )
+
+```
+
+* In march the Ninety one corp bonds was highly concentrated.
+* Even though it is still a leading position, however the PM increased risk through structured notes and swaps (SA bank credit and long dated bonds) ahead of decreasing intrest rate colatility in the market.
+
+
+--- 
+
+# Portfolio Changes Mar24 -> Jun 24
+
+```{r }
+
+# ── 1.  Select March & June, scale billions, compute Δ ─────────────
+
+headline_stat <- snap_clean %>%                  # ← your original aggregation
+  group_by(snapshot) %>%
+  summarise(
+    NAV           = sum(holdings),
+    total_mv      = sum(holdings * price),
+    port_duration = weighted.mean(active_effective_duration_mac,
+                                  w = weight_percent),
+    spread_dur    = weighted.mean(active_spread_duration,
+                                  w = weight_percent),
+    n_positions   = n(),
+    .groups = "drop"
+  )
+
+tbl_delta <- headline_stat %>% 
+  filter(snapshot %in% as.Date(c("2024-03-31", "2024-06-30"))) %>% 
+  mutate(across(c(NAV, total_mv), ~ .x / 1e9)) %>%       # R → billions
+  mutate(period = if_else(snapshot == as.Date("2024-03-31"),
+                          "Mar 2024", "Jun 2024")) %>% 
+  select(-snapshot) %>%
+  pivot_longer(-period, names_to = "Metric", values_to = "Value") %>% 
+  pivot_wider(names_from = period, values_from = Value) %>% 
+  mutate(`Δ (Jun–Mar)` = `Jun 2024` - `Mar 2024`) %>% 
+  mutate(
+    Metric = recode(Metric,
+      NAV           = "NAV (R bn)",
+      total_mv      = "Total MV (R bn)",
+      port_duration = "Eff. MacDur (yrs)",
+      spread_dur    = "Spread Dur (yrs)",
+      n_positions   = "No. Positions"
+    )
+  )
+
+# ── 2.  Present with gt ────────────────────────────────────────────
+tbl_delta %>% 
+  gt(rowname_col = "Metric") %>% 
+
+  ## Header ----
+  tab_header(
+    title    = md("**Portfolio Headline Metrics**"),
+    subtitle = "Change from 31 Mar 2024 to 30 Jun 2024"
+  ) %>% 
+
+  ## Number formats ----
+  fmt_number(
+    columns = c(`Mar 2024`, `Jun 2024`, `Δ (Jun–Mar)`),
+    rows    = Metric %in% c("NAV (R bn)", "Total MV (R bn)"),
+    decimals = 1
+  ) %>% 
+  fmt_number(
+    columns = c(`Mar 2024`, `Jun 2024`, `Δ (Jun–Mar)`),
+    rows    = Metric %in% c("Eff. MacDur (yrs)", "Spread Dur (yrs)"),
+    decimals = 2
+  ) %>% 
+  fmt_integer(
+    columns = c(`Mar 2024`, `Jun 2024`, `Δ (Jun–Mar)`),
+    rows    = Metric == "No. Positions",
+    sep_mark = ","
+  ) %>% 
+
+  ## Positive/negative colouring on Δ ----
+  tab_style(
+    style = cell_text(color = "forestgreen"),
+    locations = cells_body(
+      columns = `Δ (Jun–Mar)`,
+      rows    = `Δ (Jun–Mar)` > 0
+    )
+  ) %>% 
+  tab_style(
+    style = cell_text(color = "firebrick"),
+    locations = cells_body(
+      columns = `Δ (Jun–Mar)`,
+      rows    = `Δ (Jun–Mar)` < 0
+    )
+  ) %>% 
+
+  ## Layout tweaks ----
+  cols_align(align = "right") %>% 
+  cols_width(everything() ~ px(120)) %>% 
+  tab_options(
+    table.font.names         = "Verdana, Arial, sans-serif",
+    column_labels.font.weight= "bold",
+    data_row.padding         = px(4),
+    table.border.top.style   = "hidden",
+    table.border.bottom.style= "hidden"
+  ) %>% 
+  tab_style(                                          # zebra stripes
+    style = cell_fill(color = "#f7f7f7"),
+    locations = cells_body(rows = seq(2, nrow(tbl_delta), 2))
+  )
+```
+
+* The portfolio Risk metrics have have uptick ahead of the easing rate cycle but were still within mandate limits.
+
+* Duration protetion was trimmed interest rate risk conditions were improving and added FRNs to benefit from carry, increased long duration through structured notes positioning for a long only, as the US CPI has fallen from a high of 9.1 % (Jun-22) to the mid-2 % zone; core-PCE is now just below 2.5%. 
+
+---
+
+# Changes Mar24 -> Jun 24
+
+
+•	P&L: In nominal terms the portfolio benefited positively from this strategy while managing interest risk at within low levels. Portfolio Value rose to R4,6% from R3.8%.
+
+•	Risk: The Portfolio Effective Duration rose by 16,42% to -0.65yrs from -0.75% in March, with Portfolio Market value. 
+
+* SBK swaps were exited or reached maturity.
+
+
+```{r, include = FALSE }
+#--------------------------------------------------------------- Active Positioning ---------------------------------------------------------------------------------------
+# ── 2 · Aggregate active weights ────────────
+active_w <- june %>%
+   group_by(asset_type) %>% 
+  summarise(active_wt = weighted.mean(active_weight_percent,mv, na.rm = TRUE), .groups = "drop")%>%
+  arrange(desc(active_wt)) %>%
+  mutate(asset_type = factor(asset_type, levels = asset_type))
+
+# ── 3 · Presentation theme with legend & title spacing ─────
+theme_present <- function() {
+  theme_minimal(base_size = 12, base_family = "Arial") %+replace%
+    theme(
+      plot.title   = element_text(size = 14, face = "bold",
+                                  hjust = 0.5, margin = margin(b = 15)),
+      plot.subtitle= element_text(size = 11,  hjust = 0.5,
+                                  margin = margin(b = 6)),
+      axis.title.y = element_blank(),
+      axis.title.x = element_text(margin = margin(t = 6)),
+      axis.text    = element_text(color = "grey30"),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor   = element_blank(),
+      legend.position    = "top",
+      legend.title       = element_blank(),
+      plot.margin        = margin(10, 25, 10, 10)   # TLBR
+    )
+}
+
+# Corporate colours
+over_col <- "#2C7FB8"   # Overweight  – blue
+under_col <- "#D7191C"  # Underweight – red
+
+# ── 4 · Plot: active weight vs benchmark ───────────────────
+ggplot(active_w,
+       aes(x = asset_type,
+           y = active_wt,
+           fill = active_wt > 0)) +               # TRUE = overweight
+  geom_col(width = 0.7) +
+  geom_text(aes(label = percent(active_wt, accuracy = 0.1)),
+            hjust = ifelse(active_w$active_wt >= 0, -0.15, 1.15),
+            size  = 3.1, colour = "black") +
+  coord_flip(clip = "off") +
+  scale_fill_manual(values = c(`TRUE` = over_col,
+                               `FALSE` = under_col),
+                    labels  = c(`TRUE` = "Overweight",
+                                `FALSE`= "Underweight")) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits  = c(min(active_w$active_wt) * 1.3,
+                                 max(active_w$active_wt) * 1.3)) +
+  labs(title    = "Asset Type Active- Jun 2024",
+      
+       y = "Active weight (%)") +
+  geom_hline(yintercept = 0, colour = "grey50") +
+  theme_present()
+
+
+```
+
+---
+
+# Risk Evolution (%)
+
+```{r }
+
+# ── 1.  Declare the metrics you want to show ───────────────────────────
+metric_labels <- c(
+beta_p         = "Beta (DV01 ratio)",
+ spread_duration_active    = "Active Spread duration (yrs)",
+  credit_spread_dur_active  = "Active Credit spread-dur (yrs)",
+  tracking_error_ex_ante = "Tracking-error (%)"
+)
+
+# ── 2.  Reshape risk_ts to long format ────────────────────────────────
+plot_data <- risk_ts %>%                         # <–– your time-series tibble
+  select(reference_date, all_of(names(metric_labels))) %>%
+  pivot_longer(-reference_date, names_to = "metric", values_to = "value") %>%
+  mutate(metric = metric_labels[metric])
+
+# ── 3.  Plot: small multiples (2×2) ────────────────────────────────────
+p <- ggplot(plot_data, aes(reference_date, value)) +
+  geom_line(color = "#1f77b4", linewidth = 0.9, na.rm = TRUE) +
+  geom_point(color = "#1f77b4", size = 1.4, na.rm = TRUE) +
+  facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+  scale_x_date(
+    date_breaks  = "3 month",
+    date_labels  = "%b %Y",
+    expand       = expansion(mult = c(0.01, 0.02))
+  ) +
+  scale_y_continuous(labels = label_number(accuracy = 0.01)) +
+  labs(
+    title    = "Portfolio risk metrics over time",
+    #subtitle = "Beta, active duration, spread-duration and tracking-error",
+    x        = NULL,
+    y        = NULL,
+    
+    caption  = "Source: internal risk engine · Data as at latest valuation"
+  ) +
+  theme_minimal(base_size = 12, base_family = "Helvetica") +
+  theme(
+    plot.title      = element_text(face = "bold"),
+    plot.subtitle   = element_text(margin = margin(b = 10)),
+    panel.spacing   = unit(1.3, "lines"),
+    axis.text.x     = element_text(angle = 45, hjust = 1),
+    strip.text      = element_text(face = "bold")
+  )
+
+print(p)
+```
+
+* Tracking Error > 1 % (below 1.5 reg limit): shows conviction. The managers aren’t hugging ALBI—they’re using just under 80 % of their risk budget to pursue active returns. Yet still within risk limits of 1.5%.
+
+* Beta > 1: the portfolio has a residual long-duration bias relative to benchmark. Managers are showing that the managers have entered duration bias view taking more slight duration thatn the benchmark.
+
+* Spread duration exposure increased with active credit spread DV01 at 1.4 yrs, the fund will gain if credit spreads tighten—but lose if SA credit stress returns.
+* Between 15th to 28th of May TE Rose rose from ~0.84 to 1.14%? This seems like a deliberate re-risking with plan to benefit from the rate cut cycle especially from long dated bonds.
+
+---
+
+# Data anomalities spotted & Fixes
+
+* Prices < 0 for the asset swaps which inflated mac durations to >1000- Seen mainly from ASW FRNs(These are real exposures)
+* Put temp placeholders- approx prices at par(100) as not tonskew risk numbers while waiting for ops to investigate and update
+* Cash and Ninety one zero coupon bond prices were missing - approximate cash with 1 and Ninety Corp with par 100
+* Negative holdings for Repo - immaterial to the overall portfolio~ Included but put zero normalise the holdings.
+* The 1 day spike in TE on 28th May worth Investigating
+* Automated a report for all these data anomalities(run the report it would automatically output to the same folder this code is saved)
+
